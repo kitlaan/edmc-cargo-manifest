@@ -9,4 +9,3 @@ Tested with EDMC 5.13 (Python 3.10+).
 
 Acknowledgements:
 * Inspired by [RemainNA/cargo-manifest](https://github.com/RemainNA/cargo-manifest).
-* Commodity lists from [EDCD/FDvIDs](https://github.com/EDCD/FDevIDs).
