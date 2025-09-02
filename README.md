@@ -5,7 +5,8 @@ the cargo inventory.
 
 ## Notes
 
-Tested with EDMC 5.13 (Python 3.10+).
+Requires Python 3.11+ (EDMC 5.7.0+).
+Developed starting with EDMC 5.13.0, so YMMV.
 
 Acknowledgements:
 * Inspired by [RemainNA/cargo-manifest](https://github.com/RemainNA/cargo-manifest).

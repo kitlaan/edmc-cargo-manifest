@@ -7,7 +7,7 @@ import os
 import pathlib
 import re
 import tkinter as tk
-from typing import Any, Dict, Optional, TypedDict
+from typing import Any, Dict, NotRequired, Optional, Required, TypedDict
 
 from config import appname, config  # pyright: ignore[reportMissingImports]
 from theme import theme  # pyright: ignore[reportMissingImports]
@@ -23,15 +23,27 @@ CANONICALISE_RE = re.compile(r"\$(.+)_name;")
 RARE_COMMODITY: set[str] = set()
 
 
+class CargoItem(TypedDict):
+    Name: Required[str]
+    Name_Localised: NotRequired[str]
+    Count: Required[int]
+    Stolen: Required[int]
+
+
 class This:
     """Holds module globals."""
 
     def __init__(self):
         self.parent: tk.Tk
-
         self.ui: tk.Frame
-        self.ui_cargo_count: tk.StringVar = tk.StringVar(value="")
-        self.ui_manifest: tk.Frame
+
+        self.ui_ship_info: tk.Label
+        self.ui_ship_info_text: tk.StringVar = tk.StringVar()
+        self.ui_ship_manifest: tk.Frame
+
+        self.ui_srv_info: tk.Label
+        self.ui_srv_info_text: tk.StringVar = tk.StringVar()
+        self.ui_srv_manifest: tk.Frame
 
         self.reset()
 
@@ -40,10 +52,10 @@ class This:
         self.current_vessel_is_srv: bool = False
 
         self.ship_capacity: Optional[int] = None
-        self.ship_cargo = dict()  # TODO
+        self.ship_cargo = dict()  # TODO: what're we storing? what's the type?
 
         self.srv_capacity: Optional[int] = None
-        self.srv_cargo = dict()  # TODO
+        self.srv_cargo = dict()  # TODO: what're we storing? what's the type?
 
 
 this = This()
@@ -71,19 +83,25 @@ def plugin_app(parent: tk.Tk) -> Optional[tk.Frame]:
     :return: See PLUGINS.md#display
     """
     this.parent = parent
-
     this.ui = tk.Frame(parent)
-    ui_row = this.ui.grid_size()[1]
 
-    tk.Label(this.ui, text="Cargo Manifest:").grid(row=ui_row, column=0, sticky=tk.W)
-    tk.Label(this.ui, textvariable=this.ui_cargo_count, anchor=tk.W).grid(
-        row=ui_row, column=1, sticky=tk.E
-    )
-    ui_row += 1
+    this.ui_ship_info = tk.Label(this.ui, textvariable=this.ui_ship_info_text)
+    this.ui_ship_info.grid(row=0, sticky=tk.W)
+    this.ui_ship_info.grid_remove()
 
-    this.ui_manifest = tk.Frame(this.ui)
-    this.ui_manifest.grid(row=ui_row, columnspan=2, sticky=tk.NSEW)
-    ui_row += 1
+    this.ui_ship_manifest = tk.Frame(this.ui)
+    this.ui_ship_manifest.grid(row=1, sticky=tk.NSEW)
+    this.ui_ship_manifest.columnconfigure(2, weight=1)
+    this.ui_ship_manifest.grid_remove()
+
+    this.ui_srv_info = tk.Label(this.ui, textvariable=this.ui_srv_info_text)
+    this.ui_srv_info.grid(row=2, sticky=tk.W)
+    this.ui_srv_info.grid_remove()
+
+    this.ui_srv_manifest = tk.Frame(this.ui)
+    this.ui_srv_manifest.grid(row=3, sticky=tk.NSEW)
+    this.ui_srv_manifest.columnconfigure(2, weight=1)
+    this.ui_srv_manifest.grid_remove()
 
     return this.ui
 
@@ -110,6 +128,8 @@ def journal_entry(
     event = entry["event"]
     logger.debug(f"Journal entry received: {entry}")
 
+    data_has_changed = False
+
     # Manage the state of the GUI
     if event == "ShutDown":
         # Cleanup the GUI when quitting the game.
@@ -125,8 +145,7 @@ def journal_entry(
     elif event == "Resurrect":
         # Reset cargo tracking on resurrection
         this.reset()
-
-    data_has_changed = False
+        data_has_changed = True
 
     # Track the current vessel (ship/SRV) that we're in, so we can use it
     # to track cargo later and figure out the cargo capacity.
@@ -177,10 +196,12 @@ def journal_entry(
     if event in "Cargo":
         match entry.get("Vessel"):
             case "Ship":
-                this.ship_cargo = state["CargoJSON"]
+                this.ship_cargo = entry if "Inventory" in entry else state["CargoJSON"]
                 logger.debug(f"Ship cargo load: {this.ship_cargo}")
             case "SRV":
-                this.srv_cargo = load_json("Cargo") or {}
+                this.srv_cargo = (
+                    entry if "Inventory" in entry else load_json("Cargo") or {}
+                )
                 logger.debug(f"SRV cargo load: {this.srv_cargo}")
 
         data_has_changed = True
@@ -210,20 +231,140 @@ def journal_entry(
     # TODO: state[Modules]
 
     if data_has_changed:
-        # TODO: our GUI stuff
-        pass
+        update_gui()
 
     return None
 
 
+def populate_manifest(manifest_frame: tk.Frame, cargo: Dict[str, Any]) -> int:
+    """Populate the cargo manifest UI with the current cargo data."""
+    for widget in manifest_frame.winfo_children():
+        widget.destroy()
+
+    if not cargo or "Inventory" not in cargo:
+        return 0
+
+    total = 0
+    manifest = {}
+
+    # collate all the items
+    inventory: list[CargoItem] = cargo.get("Inventory", [])
+    for item in inventory:
+        total += item["Count"]
+        name = canonicalise(item["Name"])
+        if name in manifest:
+            manifest[name]["count"] += item["Count"]
+            manifest[name]["stolen"] += item["Stolen"]
+        else:
+            display: str = (
+                item["Name_Localised"] if "Name_Localised" in item else item["Name"]
+            )
+            if name in RARE_COMMODITY:
+                display += " ⚜️"
+            manifest[name] = {
+                "name": display,
+                "count": item["Count"],
+                "stolen": item["Stolen"],
+            }
+
+    # populate the UI, sorted by name
+    row = 0
+    for item in sorted(manifest.values(), key=lambda x: x["name"]):
+        count = item["count"] - item["stolen"]
+        if count > 0:
+            tk.Label(manifest_frame, text=f"{count}", pady=0, borderwidth=0, highlightthickness=0).grid(
+                row=row, column=0, sticky=tk.E
+            )
+            tk.Label(manifest_frame, text="–", pady=0, borderwidth=0, highlightthickness=0).grid(row=row, column=1)
+            tk.Label(manifest_frame, text=item["name"], pady=0, borderwidth=0, highlightthickness=0).grid(
+                row=row, column=2, sticky=tk.W
+            )
+            row += 1
+        if item["stolen"]:
+            tk.Label(manifest_frame, text=f"{item['stolen']}", pady=0, borderwidth=0, highlightthickness=0).grid(
+                row=row, column=0, sticky=tk.E
+            )
+            tk.Label(manifest_frame, text="⚠️", pady=0, borderwidth=0, highlightthickness=0).grid(row=row, column=1)
+            tk.Label(manifest_frame, text=item["name"], pady=0, borderwidth=0, highlightthickness=0).grid(
+                row=row, column=2, sticky=tk.W
+            )
+            row += 1
+
+    return total
+
+
+def update_gui():
+    has_rows = False
+
+    ship_occupied = 0
+    if this.ship_cargo is None:
+        this.ui_ship_manifest.grid_remove()
+    else:
+        ship_occupied = populate_manifest(this.ui_ship_manifest, this.ship_cargo)
+        if ship_occupied == 0:
+            this.ui_ship_manifest.grid_remove()
+        else:
+            this.ui_ship_manifest.grid()
+            theme.update(this.ui_ship_manifest)
+            has_rows = True
+
+    if this.ship_capacity is None and ship_occupied == 0:
+        this.ui_ship_info.grid_remove()
+    else:
+        ship_capacity = this.ship_capacity if this.ship_capacity is not None else "???"
+        this.ui_ship_info_text.set(f"Ship Manifest: {ship_occupied} / {ship_capacity}")
+        this.ui_ship_info.grid()
+        has_rows = True
+
+    if not this.current_vessel_is_srv:
+        this.ui_srv_info.grid_remove()
+        this.ui_srv_manifest.grid_remove()
+    else:
+        srv_occupied = 0
+        if this.srv_capacity is None:
+            this.ui_srv_manifest.grid_remove()
+        else:
+            srv_occupied = populate_manifest(this.ui_srv_manifest, this.srv_cargo)
+            if srv_occupied == 0:
+                this.ui_srv_manifest.grid_remove()
+            else:
+                this.ui_srv_manifest.grid()
+                theme.update(this.ui_srv_manifest)
+                has_rows = True
+
+        if this.srv_capacity is None and srv_occupied == 0:
+            this.ui_srv_info.grid_remove()
+        else:
+            srv_capacity = this.srv_capacity if this.srv_capacity is not None else "???"
+            this.ui_srv_info_text.set(f"SRV Manifest: {srv_occupied} / {srv_capacity}")
+            this.ui_srv_info.grid()
+            has_rows = True
+
+    # If we're showing no details, show a placeholder
+    if not has_rows:
+        ship_capacity = this.ship_capacity if this.ship_capacity is not None else "???"
+        this.ui_ship_info_text.set(f"Ship Capacity: {ship_capacity}")
+        this.ui_ship_info.grid()
+
 def setup_gui():
+    # Nothing yet!
     pass
-    # TODO: any Tk mucking to prepare the GUI
 
 
 def cleanup_gui():
-    pass
-    # TODO: any Tk mucking, like emptying out the cargo list or counts
+    this.ui_ship_info.grid_remove()
+    this.ui_ship_manifest.grid_remove()
+
+    this.ui_srv_info.grid_remove()
+    this.ui_srv_manifest.grid_remove()
+
+    this.ui_ship_info_text.set("")
+    for widget in this.ui_ship_manifest.winfo_children():
+        widget.destroy()
+
+    this.ui_srv_info_text.set("")
+    for widget in this.ui_srv_manifest.winfo_children():
+        widget.destroy()
 
 
 def load_commodity_csv():
