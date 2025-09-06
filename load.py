@@ -30,6 +30,15 @@ class CargoItem(TypedDict):
     Stolen: Required[int]
 
 
+class Mission(TypedDict):
+    name: str
+    name_localised: str
+    total: int
+    remaining: int
+    allocated: bool
+    stolen: bool
+
+
 class This:
     """Holds module globals."""
 
@@ -52,10 +61,12 @@ class This:
         self.current_vessel_is_srv: bool = False
 
         self.ship_capacity: Optional[int] = None
-        self.ship_cargo = dict()  # TODO: what're we storing? what's the type?
+        self.ship_cargo = dict()  # this is the full Cargo event with Inventory key
 
         self.srv_capacity: Optional[int] = None
-        self.srv_cargo = dict()  # TODO: what're we storing? what's the type?
+        self.srv_cargo = dict()  # this is the full Cargo event with Inventory key
+
+        self.missions: Dict[str, Mission] = {}
 
 
 this = This()
@@ -126,7 +137,7 @@ def journal_entry(
     :return: None if no error, else an error string.
     """
     event = entry["event"]
-    logger.debug(f"Journal entry received: {entry}")
+    #logger.debug(f"Journal entry received: {entry}")
 
     data_has_changed = False
 
@@ -159,10 +170,8 @@ def journal_entry(
         if this.current_vessel_is_srv:
             # There is no Loadout for SRVs, so we have to guess
             this.srv_capacity = get_srv_capacity(this.current_vessel)
-            logger.debug(f"SRV capacity: {this.srv_capacity}")
         elif this.current_vessel:
             this.ship_capacity = state.get("CargoCapacity", None)
-            logger.debug(f"Ship capacity: {this.ship_capacity}")
 
         data_has_changed = True
 
@@ -221,14 +230,46 @@ def journal_entry(
 
             data_has_changed = True
 
-    # TODO: Does entry[Inventory] give us what we need? Unlikely, as I think
-    # I want to separate mission delivery from normal cargo.
-    # TODO: Can I display all missions together, or show them separately?
-    # If we mission stack, how ugly does that look?
+    # Track missions, so we can show required cargo
+    # Note: there's no mechanism to get all the mission details at start, other
+    # than parsing past journal files. The "Missions" event only gives the IDs
+    # without details. Instead, we will only track new missions from the active
+    # play session. Sadness.
+    if event == "Missions":
+        # In theory this should be a complete list of missions, so for our
+        # purposes, we can ignore 'Failed' and 'Complete'
+        tracked_missions = set(this.missions.keys())
+        for mission in entry.get("Active", []):
+            if mission["MissionID"] in tracked_missions:
+                tracked_missions.remove(mission["MissionID"])
+        for mission_id in tracked_missions:
+            del this.missions[mission_id]
+            data_has_changed = True
+    elif event == "MissionAccepted":
+        if add_mission(entry):
+            data_has_changed = True
+    elif event in ["MissionAbandoned", "MissionCompleted", "MissionFailed"]:
+        # Rely on a Cargo event to update cargo state, so just stop tracking this mission
+        if entry["MissionID"] in this.missions:
+            del this.missions[entry["MissionID"]]
+            data_has_changed = True
 
-    # TODO: Mission
-    # TODO: ModuleInfo
-    # TODO: state[Modules]
+    # CargoDepot gives us information on mission cargo, particularly parial completion
+    if event == "CargoDepot":
+        name = canonicalise(entry["CargoType"])
+        if entry["MissionID"] not in this.missions:
+            logger.debug(f"Unknown mission info {entry}")
+            this.missions[entry["MissionID"]] = Mission(
+                name=name,
+                name_localised=entry.get("CargoType_Localised", entry["CargoType"]),
+                total=entry["TotalItemsToDeliver"],
+                remaining=entry["TotalItemsToDeliver"] - entry["ItemsDelivered"],
+                allocated=entry["ItemsCollected"] > 0,
+                stolen=False,  # TODO: no clue... is there a way to tell?
+            )
+        else:
+            record = this.missions[entry["MissionID"]]
+            record["remaining"] = entry["TotalItemsToDeliver"] - entry["ItemsDelivered"]
 
     if data_has_changed:
         update_gui()
@@ -236,7 +277,9 @@ def journal_entry(
     return None
 
 
-def populate_manifest(manifest_frame: tk.Frame, cargo: Dict[str, Any]) -> int:
+def populate_manifest(
+    manifest_frame: tk.Frame, cargo: Dict[str, Any], missions: Dict[str, Mission] = {}
+) -> int:
     """Populate the cargo manifest UI with the current cargo data."""
     for widget in manifest_frame.winfo_children():
         widget.destroy()
@@ -247,48 +290,147 @@ def populate_manifest(manifest_frame: tk.Frame, cargo: Dict[str, Any]) -> int:
     total = 0
     manifest = {}
 
-    # collate all the items
+    # collate all the items into a single manifest
     inventory: list[CargoItem] = cargo.get("Inventory", [])
     for item in inventory:
         total += item["Count"]
+
         name = canonicalise(item["Name"])
         if name in manifest:
-            manifest[name]["count"] += item["Count"]
+            manifest[name]["count"] += item["Count"] - item["Stolen"]
             manifest[name]["stolen"] += item["Stolen"]
         else:
-            display: str = (
-                item["Name_Localised"] if "Name_Localised" in item else item["Name"]
-            )
+            # sometimes Cargo isn't localized, but the mission is, so search there...
+            display = None
+            if "Name_Localised" in item:
+                display = item["Name_Localised"]
+            else:
+                for mission in missions.values():
+                    if mission["name"] == name:
+                        display = mission["name_localised"]
+                        break
+            if display is None:
+                display = item["Name"].title()
+
+            # give rare commodities a special flair so it's more visible
             if name in RARE_COMMODITY:
                 display += " ⚜️"
+
+            # manifest entry holds all info for a specific commodity
             manifest[name] = {
                 "name": display,
-                "count": item["Count"],
+                "count": item["Count"] - item["Stolen"],
                 "stolen": item["Stolen"],
+                "missions": {},
             }
 
-    # populate the UI, sorted by name
+        # If this specific inventory item has a mission associated, make sure to allocate it
+        if "MissionID" in item:
+            manifest[name]["missions"][item["MissionID"]] = {
+                "count": item["Count"] - item["Stolen"],
+                "stolen": item["Stolen"],
+                "count_need": None,
+                "stolen_need": None,
+            }
+            manifest[name]["count"] -= item["Count"] - item["Stolen"]
+            manifest[name]["stolen"] -= item["Stolen"]
+
+    # go through all of the known missions and attach them to the corresponding Cargo
+    for mission_id, mission in missions.items():
+        if mission["name"] not in manifest:
+            manifest[mission["name"]] = {
+                "name": mission["name_localised"],
+                "count": 0,
+                "stolen": 0,
+                "missions": {},
+            }
+        if mission_id not in manifest[mission["name"]]["missions"]:
+            manifest[mission["name"]]["missions"][mission_id] = {
+                "count": 0,
+                "stolen": 0,
+                "count_need": None,
+                "stolen_need": None,
+            }
+        record = manifest[mission["name"]]["missions"][mission_id]
+
+        if mission["stolen"]:
+            record["stolen_need"] = mission["remaining"]
+        else:
+            record["count_need"] = mission["remaining"]
+
+        if manifest[mission["name"]]["count"] > 0 and record["count_need"]:
+            allocate = min(
+                manifest[mission["name"]]["count"],
+                record["count_need"],
+            )
+            manifest[mission["name"]]["count"] -= allocate
+            record["count"] = allocate
+        if manifest[mission["name"]]["stolen"] > 0 and record["stolen_need"]:
+            allocate = min(
+                manifest[mission["name"]]["stolen"],
+                record["stolen_need"],
+            )
+            manifest[mission["name"]]["stolen"] -= allocate
+            record["stolen"] = allocate
+
+    if missions:
+        logger.debug(manifest)
+
     row = 0
+    def make_label(count: int, symbol: str, name: str, suffix: str = ""):
+        nonlocal row
+        display = f"{name} [{suffix}]" if suffix else name
+        tk.Label(
+            manifest_frame,
+            text=f"{count}",
+            pady=0,
+            borderwidth=0,
+            highlightthickness=0,
+        ).grid(row=row, column=0, sticky=tk.E)
+        tk.Label(
+            manifest_frame, text=symbol, pady=0, borderwidth=0, highlightthickness=0
+        ).grid(row=row, column=1, padx=2)
+        tk.Label(
+            manifest_frame,
+            text=display,
+            pady=0,
+            borderwidth=0,
+            highlightthickness=0,
+        ).grid(row=row, column=2, sticky=tk.W)
+        row += 1
+
+    # populate the UI, sorted by name
     for item in sorted(manifest.values(), key=lambda x: x["name"]):
-        count = item["count"] - item["stolen"]
-        if count > 0:
-            tk.Label(manifest_frame, text=f"{count}", pady=0, borderwidth=0, highlightthickness=0).grid(
-                row=row, column=0, sticky=tk.E
-            )
-            tk.Label(manifest_frame, text="–", pady=0, borderwidth=0, highlightthickness=0).grid(row=row, column=1)
-            tk.Label(manifest_frame, text=item["name"], pady=0, borderwidth=0, highlightthickness=0).grid(
-                row=row, column=2, sticky=tk.W
-            )
-            row += 1
-        if item["stolen"]:
-            tk.Label(manifest_frame, text=f"{item['stolen']}", pady=0, borderwidth=0, highlightthickness=0).grid(
-                row=row, column=0, sticky=tk.E
-            )
-            tk.Label(manifest_frame, text="⚠️", pady=0, borderwidth=0, highlightthickness=0).grid(row=row, column=1)
-            tk.Label(manifest_frame, text=item["name"], pady=0, borderwidth=0, highlightthickness=0).grid(
-                row=row, column=2, sticky=tk.W
-            )
-            row += 1
+        # show mission details first
+        mission_count = 0
+        mission_stolen = 0
+        for mission in item["missions"].values():
+            mission_count += mission["count"]
+            mission_stolen += mission["stolen"]
+            if mission["count_need"] is not None:
+                make_label(
+                    mission["count"],
+                    "🔰",
+                    item["name"],
+                    f"{mission['count_need']}",
+                )
+            elif mission["count"] > 0:
+                make_label(mission["count"], "🔰", item["name"], "#?")
+            if mission["stolen_need"] is not None:
+                make_label(
+                    mission["stolen"],
+                    "📛",
+                    item["name"],
+                    f"need {mission['stolen_need']}",
+                )
+            elif mission["stolen"] > 0:
+                make_label(mission["stolen"], "📛", item["name"], "#?")
+
+        # finally show what's remaining
+        if item["count"] > 0:
+            make_label(item["count"], "–", item["name"])
+        if item["stolen"] > 0:
+            make_label(item["stolen"], "⚠️", item["name"])
 
     return total
 
@@ -300,7 +442,9 @@ def update_gui():
     if this.ship_cargo is None:
         this.ui_ship_manifest.grid_remove()
     else:
-        ship_occupied = populate_manifest(this.ui_ship_manifest, this.ship_cargo)
+        ship_occupied = populate_manifest(
+            this.ui_ship_manifest, this.ship_cargo, this.missions
+        )
         if ship_occupied == 0:
             this.ui_ship_manifest.grid_remove()
         else:
@@ -311,8 +455,12 @@ def update_gui():
     if this.ship_capacity is None and ship_occupied == 0:
         this.ui_ship_info.grid_remove()
     else:
-        ship_capacity = this.ship_capacity if this.ship_capacity is not None else "???"
-        this.ui_ship_info_text.set(f"Ship Manifest: {ship_occupied} / {ship_capacity}")
+        if this.ship_capacity is None:
+            this.ui_ship_info_text.set(f"Ship Manifest: {ship_occupied} / ???")
+        else:
+            capacity = this.ship_capacity
+            remaining = this.ship_capacity - ship_occupied
+            this.ui_ship_info_text.set(f"Ship Manifest: {ship_occupied} / {capacity} [{remaining}]")
         this.ui_ship_info.grid()
         has_rows = True
 
@@ -335,16 +483,21 @@ def update_gui():
         if this.srv_capacity is None and srv_occupied == 0:
             this.ui_srv_info.grid_remove()
         else:
-            srv_capacity = this.srv_capacity if this.srv_capacity is not None else "???"
-            this.ui_srv_info_text.set(f"SRV Manifest: {srv_occupied} / {srv_capacity}")
+            if this.srv_capacity is None:
+                this.ui_srv_info_text.set(f"SRV Manifest: {srv_occupied} / ???")
+            else:
+                capacity = this.srv_capacity
+                remaining = this.srv_capacity - srv_occupied
+                this.ui_srv_info_text.set(f"SRV Manifest: {srv_occupied} / {capacity} [{remaining}]")
             this.ui_srv_info.grid()
             has_rows = True
 
     # If we're showing no details, show a placeholder
     if not has_rows:
-        ship_capacity = this.ship_capacity if this.ship_capacity is not None else "???"
-        this.ui_ship_info_text.set(f"Ship Capacity: {ship_capacity}")
+        capacity = this.ship_capacity if this.ship_capacity is not None else "???"
+        this.ui_ship_info_text.set(f"Ship Capacity: {capacity}")
         this.ui_ship_info.grid()
+
 
 def setup_gui():
     # Nothing yet!
@@ -433,3 +586,37 @@ def get_local_file(filename: str) -> Optional[pathlib.Path]:
     plugin_dir = pathlib.Path(__file__).parent
     filepath = plugin_dir / filename
     return filepath if filepath.is_file() else None
+
+
+def add_mission(mission: dict) -> bool:
+    type = mission["Name"].lower()
+    if type.startswith(("mission_onfoot_", "mission_sightseeing_")):
+        return False
+
+    if "Commodity" not in mission or "Count" not in mission:
+        return False
+
+    # Here are the type of missions that have ship commodities:
+    # Mission_Altruism
+    # Mission_Collect*
+    # Mission_Delivery* -- allocated
+    # Mission_Mining*
+    # Mission_Rescue* -- stolen?
+    # Mission_Salvage* -- stolen?
+
+    # TODO: verify the stolen mission mapping
+
+    # Some missions require "stolen" cargo. Some require "allocation"...
+    is_allocated = type.startswith("mission_delivery")
+    is_stolen = type.startswith(("mission_rescue", "mission_salvage"))
+
+    name = canonicalise(mission["Commodity"])
+    this.missions[mission["MissionID"]] = Mission(
+        name=name,
+        name_localised=mission.get("Commodity_Localised", mission["Commodity"]),
+        total=mission["Count"],
+        remaining=mission["Count"],
+        allocated=is_allocated,
+        stolen=is_stolen,
+    )
+    return True
