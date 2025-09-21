@@ -16,11 +16,21 @@ ModuleInfo isn't helpful since Sept-2025, as there's now Engineered Cargo Racks.
 ED isn't consistent with sending localised commodity strings, so sometimes the
 displayed names will be weird/wrong.
 
+ED don't consistently write a Cargo entry. Usually one gets written within
+20-seconds of changes, but we've (rarely) seen them not happen entirely. While
+we could workaround by tracking all cargo-effecting entries, figuring out the
+metadata (e.g. stolen) for cargo is not always possible.
+
 ## TODO
 
 * stolen cargo is tracked separately, but not fully tested
   * verify that the mission names (Mission_Rescue, Mission_Salvage) are tagged
     properly to normal/stolen cargo.
+
+## Maintenance Notes
+
+* SRV cargo capacity is hardcoded based on SRV identifier; if a new SRV type
+  is added, `get_srv_capacity()` and `is_srv()` will need to be updated.
 
 ## Notes
 

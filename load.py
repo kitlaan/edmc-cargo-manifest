@@ -7,7 +7,7 @@ import os
 import pathlib
 import re
 import tkinter as tk
-from typing import Any, Dict, NotRequired, Optional, Required, TypedDict
+from typing import Any, Dict, NotRequired, Optional, Required, Tuple, TypedDict
 
 from config import appname, config  # pyright: ignore[reportMissingImports]
 from theme import theme  # pyright: ignore[reportMissingImports]
@@ -60,7 +60,8 @@ class This:
         self.current_vessel: str = ""
         self.current_vessel_is_srv: bool = False
 
-        self.ship_capacity: Optional[int] = None
+        self.ship_capacity_guessed: bool = True
+        self.ship_capacity: int = 0
         self.ship_cargo = dict()  # this is the full Cargo event with Inventory key
 
         self.srv_capacity: Optional[int] = None
@@ -171,7 +172,10 @@ def journal_entry(
             # There is no Loadout for SRVs, so we have to guess
             this.srv_capacity = get_srv_capacity(this.current_vessel)
         elif this.current_vessel:
-            this.ship_capacity = state.get("CargoCapacity", None)
+            state_capacity = state.get("CargoCapacity", None)
+            if state_capacity is not None:
+                this.ship_capacity_guessed = False
+                this.ship_capacity = state_capacity
 
         data_has_changed = True
 
@@ -279,13 +283,13 @@ def journal_entry(
 
 def populate_manifest(
     manifest_frame: tk.Frame, cargo: Dict[str, Any], missions: Dict[str, Mission] = {}
-) -> int:
+) -> Tuple[bool, int]:
     """Populate the cargo manifest UI with the current cargo data."""
     for widget in manifest_frame.winfo_children():
         widget.destroy()
 
     if not cargo or "Inventory" not in cargo:
-        return 0
+        return False, 0
 
     total = 0
     manifest = {}
@@ -432,35 +436,37 @@ def populate_manifest(
         if item["stolen"] > 0:
             make_label(item["stolen"], "⚠️", item["name"])
 
-    return total
+    return row > 0, total
 
 
 def update_gui():
     has_rows = False
 
+    ship_has_rows = False
     ship_occupied = 0
     if this.ship_cargo is None:
         this.ui_ship_manifest.grid_remove()
     else:
-        ship_occupied = populate_manifest(
+        ship_has_rows, ship_occupied = populate_manifest(
             this.ui_ship_manifest, this.ship_cargo, this.missions
         )
-        if ship_occupied == 0:
-            this.ui_ship_manifest.grid_remove()
-        else:
+        if ship_has_rows:
             this.ui_ship_manifest.grid()
             theme.update(this.ui_ship_manifest)
             has_rows = True
+        else:
+            this.ui_ship_manifest.grid_remove()
 
-    if this.ship_capacity is None and ship_occupied == 0:
+    if (this.ship_capacity_guessed and this.ship_capacity < ship_occupied):
+        this.ship_capacity = ship_occupied
+
+    if this.ship_capacity == 0 and not ship_has_rows:
         this.ui_ship_info.grid_remove()
     else:
-        if this.ship_capacity is None:
-            this.ui_ship_info_text.set(f"Ship Manifest: {ship_occupied} / ???")
-        else:
-            capacity = this.ship_capacity
-            remaining = this.ship_capacity - ship_occupied
-            this.ui_ship_info_text.set(f"Ship Manifest: {ship_occupied} / {capacity} [{remaining}]")
+        capacity = this.ship_capacity
+        remaining = capacity - ship_occupied
+        marker = "?" if this.ship_capacity_guessed else ""
+        this.ui_ship_info_text.set(f"Ship Manifest: {ship_occupied} / {capacity}{marker} [{remaining}]")
         this.ui_ship_info.grid()
         has_rows = True
 
@@ -468,19 +474,20 @@ def update_gui():
         this.ui_srv_info.grid_remove()
         this.ui_srv_manifest.grid_remove()
     else:
+        srv_has_rows = False
         srv_occupied = 0
         if this.srv_capacity is None:
             this.ui_srv_manifest.grid_remove()
         else:
-            srv_occupied = populate_manifest(this.ui_srv_manifest, this.srv_cargo)
-            if srv_occupied == 0:
-                this.ui_srv_manifest.grid_remove()
-            else:
+            srv_has_rows, srv_occupied = populate_manifest(this.ui_srv_manifest, this.srv_cargo)
+            if srv_has_rows:
                 this.ui_srv_manifest.grid()
                 theme.update(this.ui_srv_manifest)
                 has_rows = True
+            else:
+                this.ui_srv_manifest.grid_remove()
 
-        if this.srv_capacity is None and srv_occupied == 0:
+        if this.srv_capacity is None and not srv_has_rows:
             this.ui_srv_info.grid_remove()
         else:
             if this.srv_capacity is None:
@@ -494,7 +501,7 @@ def update_gui():
 
     # If we're showing no details, show a placeholder
     if not has_rows:
-        capacity = this.ship_capacity if this.ship_capacity is not None else "???"
+        capacity = this.ship_capacity if not this.ship_capacity_guessed else "???"
         this.ui_ship_info_text.set(f"Ship Capacity: {capacity}")
         this.ui_ship_info.grid()
 
