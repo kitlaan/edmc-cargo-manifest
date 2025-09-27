@@ -383,6 +383,7 @@ def populate_manifest(
         logger.debug(manifest)
 
     row = 0
+
     def make_label(count: int, symbol: str, name: str, suffix: str = ""):
         nonlocal row
         display = f"{name} [{suffix}]" if suffix else name
@@ -459,7 +460,7 @@ def update_gui():
         else:
             this.ui_ship_manifest.grid_remove()
 
-    if (this.ship_capacity_guessed and this.ship_capacity < ship_occupied):
+    if this.ship_capacity_guessed and this.ship_capacity < ship_occupied:
         this.ship_capacity = ship_occupied
 
     if this.ship_capacity == 0 and not ship_has_rows:
@@ -468,7 +469,9 @@ def update_gui():
         capacity = this.ship_capacity
         remaining = capacity - ship_occupied
         marker = "?" if this.ship_capacity_guessed else ""
-        this.ui_ship_info_text.set(f"Ship Manifest: {ship_occupied} / {capacity}{marker} [{remaining}]")
+        this.ui_ship_info_text.set(
+            f"Ship Manifest: {ship_occupied} / {capacity}{marker} [{remaining}]"
+        )
         this.ui_ship_info.grid()
         has_rows = True
 
@@ -481,7 +484,9 @@ def update_gui():
         if this.srv_capacity is None:
             this.ui_srv_manifest.grid_remove()
         else:
-            srv_has_rows, srv_occupied = populate_manifest(this.ui_srv_manifest, this.srv_cargo)
+            srv_has_rows, srv_occupied = populate_manifest(
+                this.ui_srv_manifest, this.srv_cargo
+            )
             if srv_has_rows:
                 this.ui_srv_manifest.grid()
                 theme.update(this.ui_srv_manifest)
@@ -497,13 +502,20 @@ def update_gui():
             else:
                 capacity = this.srv_capacity
                 remaining = this.srv_capacity - srv_occupied
-                this.ui_srv_info_text.set(f"SRV Manifest: {srv_occupied} / {capacity} [{remaining}]")
+                this.ui_srv_info_text.set(
+                    f"SRV Manifest: {srv_occupied} / {capacity} [{remaining}]"
+                )
             this.ui_srv_info.grid()
             has_rows = True
 
     # If we're showing no details, show a placeholder
     if not has_rows:
-        capacity = this.ship_capacity if not this.ship_capacity_guessed else "???"
+        if this.ship_capacity_guessed:
+            capacity = "???"
+        elif this.ship_capacity == 0:
+            capacity = "None"
+        else:
+            capacity = this.ship_capacity
         this.ui_ship_info_text.set(f"Ship Capacity: {capacity}")
         this.ui_ship_info.grid()
 
