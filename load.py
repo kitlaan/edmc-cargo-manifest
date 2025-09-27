@@ -104,7 +104,7 @@ def plugin_app(parent: tk.Tk) -> Optional[tk.Frame]:
     this.ui_ship_info.grid_remove()
 
     this.ui_ship_manifest = tk.Frame(this.ui)
-    this.ui_ship_manifest.grid(row=1, sticky=tk.NSEW, padx=(left_pad,0))
+    this.ui_ship_manifest.grid(row=1, sticky=tk.NSEW, padx=(left_pad, 0))
     this.ui_ship_manifest.columnconfigure(2, weight=1)
     this.ui_ship_manifest.grid_remove()
 
@@ -113,7 +113,7 @@ def plugin_app(parent: tk.Tk) -> Optional[tk.Frame]:
     this.ui_srv_info.grid_remove()
 
     this.ui_srv_manifest = tk.Frame(this.ui)
-    this.ui_srv_manifest.grid(row=3, sticky=tk.NSEW, padx=(left_pad,0))
+    this.ui_srv_manifest.grid(row=3, sticky=tk.NSEW, padx=(left_pad, 0))
     this.ui_srv_manifest.columnconfigure(2, weight=1)
     this.ui_srv_manifest.grid_remove()
 
