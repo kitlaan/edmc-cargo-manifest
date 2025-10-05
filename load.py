@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import datetime
 import json
 import logging
 import os
@@ -30,9 +31,12 @@ class CargoItem(TypedDict):
     Stolen: Required[int]
 
 
+# Reminder: we now serialize this to JSON, so we need to consider backwards compatibility
+# when changing this structure. New fields must be NotRequired, and handled during load.
 class Mission(TypedDict):
     name: str
     name_localised: str
+    expiry: Optional[str]  # ISO8601 UTC timestamp
     total: int
     remaining: int
     allocated: bool
@@ -68,6 +72,45 @@ class This:
         self.srv_cargo = dict()  # this is the full Cargo event with Inventory key
 
         self.missions: Dict[str, Mission] = {}
+
+    def save_missions(self):
+        mission_file = get_local_file("missions.json", False)
+        if mission_file:
+            try:
+                with open(mission_file, "w") as f:
+                    json.dump(self.missions, f, indent=2, ensure_ascii=False)
+            except Exception as e:
+                logger.error(f"Failed to save missions: {e}")
+
+    def load_missions(self):
+        mission_file = get_local_file("missions.json")
+        if mission_file:
+            try:
+                with open(mission_file, "r") as f:
+                    loaded_missions = json.load(f)
+
+                    now = datetime.datetime.now(datetime.timezone.utc)
+                    one_week_ago = now - datetime.timedelta(weeks=1)
+
+                    # Remove missions with missing expiry, None expiry, or expiry older than 1 week
+                    filtered_missions = {}
+                    for mission_id, mission in loaded_missions.items():
+                        expiry = mission.get("expiry")
+                        if not expiry:
+                            continue
+                        try:
+                            expiry_dt = datetime.datetime.fromisoformat(
+                                expiry.replace("Z", "+00:00")
+                            )
+                        except Exception:
+                            continue
+                        if expiry_dt < one_week_ago:
+                            continue
+                        filtered_missions[mission_id] = mission
+
+                    self.missions = filtered_missions
+            except Exception as e:
+                logger.error(f"Failed to load missions: {e}")
 
 
 this = This()
@@ -156,9 +199,11 @@ def journal_entry(
         # Make sure GUI is set up at game start
         load_commodity_csv()
         setup_gui()
+        this.load_missions()
     elif event == "Resurrect":
         # Reset cargo tracking on resurrection
         this.reset()
+        this.save_missions()
         data_has_changed = True
 
     # Track the current vessel (ship/SRV) that we're in, so we can use it
@@ -242,40 +287,47 @@ def journal_entry(
     # without details. Instead, we will only track new missions from the active
     # play session. Sadness.
     if event == "Missions":
-        # In theory this should be a complete list of missions, so for our
-        # purposes, we can ignore 'Failed' and 'Complete'
+        # In theory this should be a complete list of missions (without details),
+        # so for our purposes, we can ignore 'Failed' and 'Complete'
         tracked_missions = set(this.missions.keys())
         for mission in entry.get("Active", []):
-            if mission["MissionID"] in tracked_missions:
-                tracked_missions.remove(mission["MissionID"])
+            if str(mission["MissionID"]) in tracked_missions:
+                tracked_missions.remove(str(mission["MissionID"]))
         for mission_id in tracked_missions:
             del this.missions[mission_id]
             data_has_changed = True
+        # We've changed the list, save the file
+        if tracked_missions:
+            this.save_missions()
     elif event == "MissionAccepted":
         if add_mission(entry):
             data_has_changed = True
+            this.save_missions()
     elif event in ["MissionAbandoned", "MissionCompleted", "MissionFailed"]:
         # Rely on a Cargo event to update cargo state, so just stop tracking this mission
-        if entry["MissionID"] in this.missions:
-            del this.missions[entry["MissionID"]]
+        if str(entry["MissionID"]) in this.missions:
+            del this.missions[str(entry["MissionID"])]
             data_has_changed = True
+            this.save_missions()
 
-    # CargoDepot gives us information on mission cargo, particularly parial completion
+    # CargoDepot gives us information on mission cargo, particularly partial completion
     if event == "CargoDepot":
         name = canonicalise(entry["CargoType"])
-        if entry["MissionID"] not in this.missions:
+        if str(entry["MissionID"]) not in this.missions:
             logger.debug(f"Unknown mission info {entry}")
-            this.missions[entry["MissionID"]] = Mission(
+            this.missions[str(entry["MissionID"])] = Mission(
                 name=name,
                 name_localised=entry.get("CargoType_Localised", entry["CargoType"]),
+                expiry=None,
                 total=entry["TotalItemsToDeliver"],
                 remaining=entry["TotalItemsToDeliver"] - entry["ItemsDelivered"],
                 allocated=entry["ItemsCollected"] > 0,
                 stolen=False,  # TODO: no clue... is there a way to tell?
             )
         else:
-            record = this.missions[entry["MissionID"]]
+            record = this.missions[str(entry["MissionID"])]
             record["remaining"] = entry["TotalItemsToDeliver"] - entry["ItemsDelivered"]
+        this.save_missions()
 
     if data_has_changed:
         update_gui()
@@ -332,11 +384,12 @@ def populate_manifest(
 
         # If this specific inventory item has a mission associated, make sure to allocate it
         if "MissionID" in item:
-            manifest[name]["missions"][item["MissionID"]] = {
+            manifest[name]["missions"][str(item["MissionID"])] = {
                 "count": item["Count"] - item["Stolen"],
                 "stolen": item["Stolen"],
                 "count_need": None,
                 "stolen_need": None,
+                "allocated": True,
             }
             manifest[name]["count"] -= item["Count"] - item["Stolen"]
             manifest[name]["stolen"] -= item["Stolen"]
@@ -356,8 +409,11 @@ def populate_manifest(
                 "stolen": 0,
                 "count_need": None,
                 "stolen_need": None,
+                "allocated": False,
             }
         record = manifest[mission["name"]]["missions"][mission_id]
+
+        record["allocated"] = mission["allocated"]
 
         if mission["stolen"]:
             record["stolen_need"] = mission["remaining"]
@@ -417,12 +473,17 @@ def populate_manifest(
             if mission["count_need"] is not None:
                 make_label(
                     mission["count"],
-                    "🔰",
+                    "🛡️" if not mission["allocated"] else "🔗",
                     item["name"],
                     f"{mission['count_need']}",
                 )
             elif mission["count"] > 0:
-                make_label(mission["count"], "🔰", item["name"], "#?")
+                make_label(
+                    mission["count"],
+                    "🛡️" if not mission["allocated"] else "🔗",
+                    item["name"],
+                    "#?",
+                )
             if mission["stolen_need"] is not None:
                 make_label(
                     mission["stolen"],
@@ -603,10 +664,10 @@ def load_json(item: str) -> Optional[dict]:
         return None
 
 
-def get_local_file(filename: str) -> Optional[pathlib.Path]:
+def get_local_file(filename: str, checkFile: bool = True) -> Optional[pathlib.Path]:
     plugin_dir = pathlib.Path(__file__).parent
     filepath = plugin_dir / filename
-    return filepath if filepath.is_file() else None
+    return filepath if (checkFile == False or filepath.is_file()) else None
 
 
 def add_mission(mission: dict) -> bool:
@@ -632,9 +693,10 @@ def add_mission(mission: dict) -> bool:
     is_stolen = type.startswith(("mission_rescue", "mission_salvage"))
 
     name = canonicalise(mission["Commodity"])
-    this.missions[mission["MissionID"]] = Mission(
+    this.missions[str(mission["MissionID"])] = Mission(
         name=name,
         name_localised=mission.get("Commodity_Localised", mission["Commodity"]),
+        expiry=mission.get("Expiry"),
         total=mission["Count"],
         remaining=mission["Count"],
         allocated=is_allocated,
