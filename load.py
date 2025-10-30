@@ -219,7 +219,7 @@ def journal_entry(
             # There is no Loadout for SRVs, so we have to guess
             this.srv_capacity = get_srv_capacity(this.current_vessel)
         elif this.current_vessel:
-            state_capacity = state.get("CargoCapacity", None)
+            state_capacity = state.get("CargoCapacity", entry.get("CargoCapacity", None))
             if state_capacity is not None:
                 this.ship_capacity_guessed = False
                 this.ship_capacity = state_capacity
