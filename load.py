@@ -521,8 +521,12 @@ def update_gui():
         else:
             this.ui_ship_manifest.grid_remove()
 
-    if this.ship_capacity_guessed and this.ship_capacity < ship_occupied:
+    if this.ship_capacity_guessed:
+        if this.ship_capacity < ship_occupied:
+            this.ship_capacity = ship_occupied
+    elif ship_occupied > this.ship_capacity:
         this.ship_capacity = ship_occupied
+        this.ship_capacity_guessed = True
 
     if this.ship_capacity == 0 and not ship_has_rows:
         this.ui_ship_info.grid_remove()
